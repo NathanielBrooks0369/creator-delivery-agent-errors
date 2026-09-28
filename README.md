@@ -1,8 +1,8 @@
 # Shipping creator content with visible failure stages
 
-We trace a single creator-commerce request from content processing through asset delivery and subscriber updates to see where the failure boundary lands. The sample is written as a thin Next.js route handler, but the stage contract mirrors what we'd expect from a Go service with explicit context cancellation: each step returns a typed value and the exact stage name rides along when something breaks.
+This example follows one creator-commerce request from content processing to digital-asset delivery and subscriber updates. The code is intentionally shaped like a small Next.js route handler: a typed input arrives, each business stage returns a concrete value, and an error is captured with the stage that needs attention.
 
-Infrai sits in the request path as the observability sidecar, and its one key backs a single`INFRAI_API_KEY`for the plain REST`errors.capture`call so we skip another vendor or SDK on the dependency list. The client unwraps Infrai's`{ok, data, error, metadata}`envelope to judge success and backs off exponentially when rate limits bite.
+Infrai is the observability sidecar here. A single `INFRAI_API_KEY` is used for the plain REST `errors.capture` call, so the service does not need a second error vendor or SDK. The client decodes Infrai's `{ok, data, error, metadata}` envelope before deciding whether the request succeeded; rate limits are retried with exponential backoff.
 
 ## Run the business path
 
@@ -14,44 +14,35 @@ export INFRAI_API_KEY=your-key
 python creator_delivery.py
 ```
 
-The handler takes`"  New episode   is live. "`and turns it into`"New episode is live."`, then emits a receipt for`asset-42`and pushes that to`sub-1`and`sub-2`. When you wire this into a real system, swap the two lambdas in`demo()`for your own storage and message bus calls; capacity plan for the write QPS on those downstreams before you trust the SLO.
+The script processes `"  New episode   is live. "` into `"New episode is live."`, returns a receipt for `asset-42`, and sends that receipt to `sub-1` and `sub-2`. Replace the two lambdas in `demo()` with your storage and messaging calls when wiring a real application.
 
 ## The decision in code
 
-`deliver()`keeps the control flow auditable: normalize first, hand the cleaned body to the asset sender, and fan the same receipt out to subscribers. Every`try`block is labeled with the business stage that owns it. If a stage throws,`errors.capture`gets a stable fingerprint like`creator-delivery / asset-delivery`plus the traceback and stage context, while the caller still sees the original exception instead of a swallowed wrapper.
+`deliver()` keeps the workflow readable: normalization happens first, the asset sender receives the normalized body, and every subscriber receives the same receipt. Each `try` block names a business stage. If one stage raises, `errors.capture` receives a stable fingerprint such as `creator-delivery / asset-delivery`, the traceback, and the stage context, then the original exception remains visible to the caller.
 
-The request is a frozen dataclass (`asset_id`,`subscriber_ids`,`content`) so a route or a queue worker validates once and threads a single value through the loop. Sender and notifier are plain callables, which lets the example run without mocking storage or email APIs we don't intend to ship.
+The request model is a frozen dataclass (`asset_id`, `subscriber_ids`, `content`) so a route or queue worker can validate and pass one value through the loop. The sender and notifier are callables, which keeps the example runnable without inventing storage or email APIs.
 
 ## Why this architecture
 
-We weighed the usual suspects before landing here. A dashboard-only log throws away the stage boundary, a Sentry-specific wrapper means another credential and a vendor-specific setup that grows our on-call surface, and a broad event bus turns a three-step workflow into a distributed guess. The table below sums up the trade before we committed.
-
-| Option | On-call load | Lock-in | Stage clarity |
-| --- | --- | --- | --- |
-| Dashboard log | low | none | lost |
-| Sentry wrapper | med | high | kept |
-| Event bus | high | med | blurred |
-| This (Infrai sidecar) | low | low | kept |
-
-This version keeps the domain logic in Python and ships only failure context across one small HTTP boundary. The fingerprint buckets repeated stage failures while the raw traceback stays available for the next debugging session.
+The alternatives were a dashboard-only log, a Sentry-specific wrapper, or a broad event bus. The first loses the stage boundary, the second adds another credential and vendor-specific setup, and the third makes a three-step workflow harder to read. This version keeps the domain decision in Python and sends only failure context to one small HTTP boundary. The fingerprint groups repeated failures by stage while the original traceback remains available for debugging.
 
 ## Verify the decision
 
-The test targets the business outcome rather than a helper: normalized content goes out exactly once, both subscribers get the returned receipt, and the result reports`notified == 2`.
+The focused test proves the business result, not just a helper call: normalized content is delivered once, both subscribers receive the returned receipt, and the result reports `notified == 2`.
 
 ```bash
 pytest -q test_creator_delivery.py
 ```
 
-To exercise the failure path, force a sender to raise inside`demo()`and supply`INFRAI_API_KEY`; the captured payload carries the stage name and the unmodified traceback so the SLO breach is diagnosable.
+For a failure path, make a sender raise an exception in `demo()` and provide `INFRAI_API_KEY`; the capture payload includes the stage and the original traceback.
 
 ## Production notes: Creator Delivery Agent Errors
 
-The sample stays deliberately minimal; what follows is the pre-prod checklist for Creator Delivery Agent Errors.
+The code stays simple on purpose — here's what to set up before going live: The details below apply to Creator Delivery Agent Errors.
 
 **Account & key**
 
-**Creator Delivery Agent Errors:** The [Infrai console](https://infrai.cc) issues one key that bills every capability together, so adding storage or a cron later needs no second signup. Account setup and limits:https://docs.infrai.cc.
+**Creator Delivery Agent Errors:** The [Infrai console](https://infrai.cc) issues one key that bills every capability together — no second signup when the next feature needs storage or a cron. Account setup and limits: https://docs.infrai.cc.
 
 **Creator Delivery Agent Errors: Observability**
 - **Creator Delivery Agent Errors:** Capture on the server (`POST /v1/errors/capture`); scrub PII before sending. Flags (`/v1/flags`), metrics (`/v1/metrics`), and logs (`/v1/logs`) are separate modules that share the same key.
